@@ -5,3 +5,7 @@
 
 [functions]
   node_bundler = "esbuild"
+
+# Give the AI function the maximum synchronous time (helps long document generations).
+[functions."ai"]
+  timeout = 26
