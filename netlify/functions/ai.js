@@ -1,22 +1,68 @@
-// Serverless AI proxy — keeps your Anthropic key server-side.
-export const handler = async (event) => {
-  if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
+// Netlify Function: secure AI proxy for Conforma.
+// Keeps your Anthropic key on the server. Deploy, then set env vars:
+//   ANTHROPIC_API_KEY = your Anthropic API key   (required)
+//   CLAUDE_MODEL      = claude-haiku-4-5-20251001 (optional; this is the default)
+//
+// Health check: open this function's URL in a browser (GET). It returns
+// { ok, hasKey, model } so you can confirm the key is set WITHOUT revealing it.
+
+exports.handler = async (event) => {
+  const cors = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+    "Content-Type": "application/json",
+  };
+
+  const MODEL =
+    process.env.CLAUDE_MODEL ||
+    process.env.ANTHROPIC_MODEL ||
+    "claude-haiku-4-5-20251001";
+
+  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
+
+  // Health check — safe, never reveals the key value.
+  if (event.httpMethod === "GET") {
+    return {
+      statusCode: 200,
+      headers: cors,
+      body: JSON.stringify({ ok: true, hasKey: !!process.env.ANTHROPIC_API_KEY, model: MODEL }),
+    };
+  }
+
+  if (event.httpMethod !== "POST")
+    return { statusCode: 405, headers: cors, body: JSON.stringify({ error: { message: "Use POST" } }) };
+
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return { statusCode: 500, body: JSON.stringify({ error: { message: "ANTHROPIC_API_KEY not set in Netlify env" } }) };
+  if (!key)
+    return { statusCode: 500, headers: cors, body: JSON.stringify({ error: { message: "ANTHROPIC_API_KEY is not set on the server." } }) };
+
   let payload;
-  try { payload = JSON.parse(event.body || "{}"); } catch { return { statusCode: 400, body: JSON.stringify({ error: { message: "bad json" } }) }; }
+  try { payload = JSON.parse(event.body || "{}"); }
+  catch { return { statusCode: 400, headers: cors, body: JSON.stringify({ error: { message: "Invalid JSON body." } }) }; }
+
   const { messages, system, max_tokens } = payload;
-  const body = { model: process.env.CLAUDE_MODEL || "claude-3-5-sonnet-latest", max_tokens: max_tokens || 4000, messages };
+  if (!Array.isArray(messages))
+    return { statusCode: 400, headers: cors, body: JSON.stringify({ error: { message: "messages[] required." } }) };
+
+  const body = {
+    model: MODEL,
+    max_tokens: Math.min(Number(max_tokens) || 4000, 8000),
+    messages,
+  };
   if (system) body.system = system;
+
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
       body: JSON.stringify(body),
     });
-    const data = await r.json();
-    if (!r.ok) return { statusCode: r.status, body: JSON.stringify({ error: data.error || data }) };
-    const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
-    return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) };
-  } catch (e) { return { statusCode: 500, body: JSON.stringify({ error: { message: String(e) } }) }; }
+    const data = await res.json();
+    if (!res.ok) return { statusCode: res.status, headers: cors, body: JSON.stringify(data) };
+    const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+    return { statusCode: 200, headers: cors, body: JSON.stringify({ text }) };
+  } catch (e) {
+    return { statusCode: 502, headers: cors, body: JSON.stringify({ error: { message: "Upstream call failed: " + e.message } }) };
+  }
 };
